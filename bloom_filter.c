@@ -22,7 +22,7 @@
 #include "bloom_filter.h"
 
 #define _BLOOM_FILTER_UNIT_TEST_
-// #undef _BLOOM_FILTER_UNIT_TEST_
+#undef _BLOOM_FILTER_UNIT_TEST_
 
 struct bloom_crypto_alg{
 	__u8					*data;
@@ -240,6 +240,10 @@ int __bit_for_crypto_alg(struct bloom_crypto_alg *alg,
 	__u32 i, temp;
 	int ret;
 
+#ifdef _BLOOM_FILTER_UNIT_TEST_
+	printk(KERN_INFO "Wrap_size = %d.\n", wrap_size);
+#endif /* _BLOOM_FILTER_UNIT_TEST_ */
+
 	/** NOTE: originally we may use CRYPTO_TRM_REQ_MAY_SLEEP, 
 	 * but we want this process to be non-blocking. */
 	desc.flags = CRYPTO_TFM_REQ_MAY_BACKLOG; 
@@ -257,12 +261,18 @@ int __bit_for_crypto_alg(struct bloom_crypto_alg *alg,
 	}
 
 	temp = 0;
-	for(i = 0; i < alg->len; i++)
+	for(i = 0; i<alg->len; i++)
 	{
-		temp += alg->data[i]; /** FIXME: This may result in the bit position to a smaller value*/
+		temp += alg->data[i] * wrap_size / 256;
+#ifdef _BLOOM_FILTER_UNIT_TEST_
+		printk("%02x ", alg->data[i]);
+#endif /* _BLOOM_FILTER_UNIT_TEST_*/
 		temp %= wrap_size;
 	}
 
+#ifdef _BLOOM_FILTER_UNIT_TEST_
+	printk("\n %d\n", temp);
+#endif /* _BLOOM_FILTER_UNIT_TEST_ */
 	*bit = temp;
 
 	return 0;
@@ -546,7 +556,7 @@ int run_testing(void){
 
 	printk(KERN_WARNING "Testing inserting function:\n");
 	filter = bloom_filter_create_n(15000000, 5);
-	
+
 	ret = bloom_filter_insert(filter, str1, sizeof(str1) - 1);
 	if (ret < 0){
 		printk(KERN_INFO "Inserting \"%s\" error.\n", str1);
