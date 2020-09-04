@@ -22,7 +22,7 @@
 #include "bloom_filter.h"
 
 #define _BLOOM_FILTER_UNIT_TEST_
-#undef _BLOOM_FILTER_UNIT_TEST_
+// #undef _BLOOM_FILTER_UNIT_TEST_
 
 struct bloom_crypto_alg{
 	__u8					*data;
@@ -52,7 +52,11 @@ struct bloom_filter * bloom_filter_create(__u32 bitsize)
 	filter->bitmap_size = bitsize;
 	filter->bitmap_bytes = bitmap_size;
 	filter->num_algs = 0;
-	INIT_LIST_HEAD(&filter->alg_list);
+	INIT_LIST_HEAD(&(filter->alg_list));
+
+#ifdef _BLOOM_FILTER_UNIT_TEST_
+	printk(KERN_INFO "Bloom filter initialized at %p.\n", filter);
+#endif /* _BLOOM_FILTER_UNIT_TEST_ */
 
 	return filter;
 }
@@ -75,7 +79,7 @@ struct bloom_filter * bloom_filter_create_n(__u32 bitsize, __u32 num_algs)
 	filter->bitmap_size = bitsize;
 	filter->bitmap_bytes = bitmap_size;
 	filter->num_algs = num_algs;
-	INIT_LIST_HEAD(&filter->alg_list);
+	INIT_LIST_HEAD(&(filter->alg_list));
 
 	for(i = 0; i< num_algs; i++){
 		switch (i){
@@ -91,7 +95,9 @@ struct bloom_filter * bloom_filter_create_n(__u32 bitsize, __u32 num_algs)
 		}
 		
 	}
-
+#ifdef _BLOOM_FILTER_UNIT_TEST_
+	printk(KERN_INFO "Bloom filter initialized at %p.\n", filter);
+#endif /* _BLOOM_FILTER_UNIT_TEST_ */
 	return filter;
 }
 
@@ -133,16 +139,16 @@ int bloom_filter_add_hash_alg(struct bloom_filter *filter, const char *name)
 		ret = -ENOMEM;
 		goto err_create_data;
 	}
-
-	list_add_tail(&alg->node, &filter->alg_list);
-
-	if(list_is_singular(&filter->alg_list)){
+	
+	if(list_is_singular(&(filter->alg_list))){
 		alg->order = 1;
 	}
 	else{
-		last = list_last_entry(&filter->alg_list, struct bloom_crypto_alg, node);
+		last = list_last_entry(&(filter->alg_list), struct bloom_crypto_alg, node);
 		alg->order = last->order + 1;
 	}
+
+	list_add_tail(&(alg->node), &(filter->alg_list));
 
 is_dummy_out:
 	filter->num_algs ++;
@@ -182,8 +188,6 @@ int bloom_filter_add_crypto_hash(struct bloom_filter *filter, struct crypto_hash
 		goto err_create_data;
 	}
 
-	list_add_tail(&alg->node, &filter->alg_list);
-
 	if(list_is_singular(&filter->alg_list)){
 		alg->order = 1;
 	}
@@ -191,6 +195,8 @@ int bloom_filter_add_crypto_hash(struct bloom_filter *filter, struct crypto_hash
 		last = list_last_entry(&filter->alg_list, struct bloom_crypto_alg, node);
 		alg->order = last->order + 1;
 	}
+
+	list_add_tail(&alg->node, &filter->alg_list);
 
 	filter->num_algs ++;
 
@@ -236,7 +242,7 @@ int __bit_for_crypto_alg(struct bloom_crypto_alg *alg,
 	temp = 0;
 	for(i = 0; i < alg->len; i++)
 	{
-		temp += alg->data[i];
+		temp += alg->data[i]; /** FIXME: This may result in the bit position to a smaller value*/
 		temp %= wrap_size;
 	}
 
@@ -257,7 +263,7 @@ int bloom_filter_insert(struct bloom_filter *filter, const __u8 *data, __u32 siz
 	int ret = 0;
 	__u32 bit1 = 0, bit2 = 0;
 
-	if (list_empty(&filter->alg_list)){
+	if (list_empty(&(filter->alg_list))){
 		ret = -EINVAL;
 		goto exit;
 	}
@@ -284,7 +290,9 @@ int bloom_filter_insert(struct bloom_filter *filter, const __u8 *data, __u32 siz
 				}
 				break;
 		}
-
+#ifdef _BLOOM_FILTER_UNIT_TEST_
+		printk(KERN_INFO "Inserting bit pos=%d.\n", bit);
+#endif /* _BLOOM_FILTER_UNIT_TEST_ */
 		if(ret < 0){
 			goto exit;
 		}
@@ -296,7 +304,7 @@ exit:
 	return ret;
 }
 
-/** blomm_filter_check - checks if an element is in the filter
+/** bloom_filter_check - checks if an element is in the filter
  * @filter: the bloom filter to check
  * @data: the starting pointer for data structure
  * @size: the length of data structure,
@@ -342,7 +350,9 @@ int bloom_filter_check(struct bloom_filter *filter, const __u8 *data, __u32 size
 		if (ret < 0){
 			goto exit;
 		}
-
+#ifdef _BLOOM_FILTER_UNIT_TEST_
+		printk(KERN_INFO "Checking bit pos=%d.\n", bit);
+#endif /* _BLOOM_FILTER_UNIT_TEST_ */
 		if (!test_bit(bit, filter->bitmap)){
 			*result = false;
 			break;
@@ -415,7 +425,8 @@ void bloom_filter_bitmap_set(struct bloom_filter *filter, const __u8 *data)
  */
 void bloom_filter_bitmap_clear(struct bloom_filter *filter)
 {
-	bitmap_zero(filter->bitmap, filter->bitmap_size);
+	if(filter->bitmap) // Only clear available bitmaps
+		bitmap_zero(filter->bitmap, filter->bitmap_size);
 }
 
 /** bloom_filter_get_hash_digest - get a hash digest for input scatterlist
@@ -463,7 +474,7 @@ int bloom_filter_print_each_hash_digest(struct bloom_filter *filter, const __u8 
 	int ret;
 	__u32 i;
 
-	list_for_each_entry(alg, &filter->alg_list, node){
+	list_for_each_entry(alg, &(filter->alg_list), node){
 		ret = __bloom_filter_get_hash_digest(alg, data, size);
 		if (ret < 0){
 			return ret;
@@ -512,7 +523,7 @@ int run_testing(void){
 	bloom_filter_unref(filter);
 
 	printk(KERN_WARNING "\nTesting inserting function:\n");
-	filter = bloom_filter_create_n(1024, 5);
+	filter = bloom_filter_create_n(150000000, 5);
 	
 	ret = bloom_filter_insert(filter, str1, sizeof(str1) - 1);
 	if (ret < 0){
