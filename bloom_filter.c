@@ -93,7 +93,10 @@ struct bloom_filter * bloom_filter_create_n(__u32 bitsize, __u32 num_algs)
 			ret = bloom_filter_add_hash_alg(filter, "dummy");
 			break;
 		}
-		
+		if(ret < 0){
+			printk(KERN_WARNING "Error creating hash function NO.=%d.\n", i);
+			return ERR_PTR(ret);
+		}
 	}
 #ifdef _BLOOM_FILTER_UNIT_TEST_
 	printk(KERN_INFO "Bloom filter initialized at %p.\n", filter);
@@ -109,8 +112,7 @@ int bloom_filter_add_hash_alg(struct bloom_filter *filter, const char *name)
 {
 	struct bloom_crypto_alg *alg, *last;
 	int ret = 0;
-	char name1[] = "sha1";
-	char name2[] = "md5";
+	char name_dummy[] = "dummy";
 
 	alg = kzalloc(sizeof(struct bloom_crypto_alg), GFP_KERNEL);
 	if(!alg){
@@ -118,7 +120,7 @@ int bloom_filter_add_hash_alg(struct bloom_filter *filter, const char *name)
 		goto exit;
 	}
 
-	if(memcmp(name1, name, sizeof(name1)) || memcmp(name2, name, sizeof(name2))){ // is not dummy
+	if(memcmp(name_dummy, name, sizeof(name_dummy))){ // is not dummy
 		alg->is_dummy = false;
 	}
 	else{
@@ -150,7 +152,22 @@ int bloom_filter_add_hash_alg(struct bloom_filter *filter, const char *name)
 
 	list_add_tail(&(alg->node), &(filter->alg_list));
 
+	filter->num_algs ++;
+
+	return 0;
+
 is_dummy_out:
+
+	if(list_is_singular(&(filter->alg_list))){
+		alg->order = 1;
+	}
+	else{
+		last = list_last_entry(&(filter->alg_list), struct bloom_crypto_alg, node);
+		alg->order = last->order + 1;
+	}
+
+	list_add_tail(&(alg->node), &(filter->alg_list));
+
 	filter->num_algs ++;
 
 	return 0;
@@ -261,7 +278,9 @@ int bloom_filter_insert(struct bloom_filter *filter, const __u8 *data, __u32 siz
 	struct bloom_crypto_alg *alg;
 	struct scatterlist sg;
 	int ret = 0;
+	__u32 count = 0;
 	__u32 bit1 = 0, bit2 = 0;
+	bool bit1_hashed = false, bit2_hashed = false;
 
 	if (list_empty(&(filter->alg_list))){
 		ret = -EINVAL;
@@ -270,28 +289,29 @@ int bloom_filter_insert(struct bloom_filter *filter, const __u8 *data, __u32 siz
 
 	sg_init_one(&sg, data, size);
 
-	list_for_each_entry(alg, &filter->alg_list, node){
+	list_for_each_entry(alg, &filter->alg_list, node){// We may not use list operations or change the dummy into lists
 		__u32 bit;
-		switch(alg->order){
-			case 1:
+		count ++;
+		if(alg->is_dummy){
+			bit = (bit1 + (alg->order) * bit2) % filter->bitmap_size;
+		}
+		else{
+			if(!bit1_hashed){
 				ret = __bit_for_crypto_alg(alg, &sg, filter->bitmap_size, &bit);
 				bit1 = bit;
-				break;
-			case 2:
+				bit1_hashed = true;
+			}
+			else if (!bit2_hashed){
 				ret = __bit_for_crypto_alg(alg, &sg, filter->bitmap_size, &bit);
 				bit2 = bit;
-				break;
-			default:
-				if(alg->is_dummy){
-					bit = (bit1 + (alg->order) * bit2) % filter->bitmap_size;
-				}
-				else{
-					ret = __bit_for_crypto_alg(alg, &sg, filter->bitmap_size, &bit);
-				}
-				break;
+				bit2_hashed = true;
+			}
+			else{
+				ret = __bit_for_crypto_alg(alg, &sg, filter->bitmap_size, &bit);
+			}
 		}
-#ifdef _BLOOM_FILTER_UNIT_TEST_
-		printk(KERN_INFO "Inserting bit pos=%d.\n", bit);
+#ifdef _BLOOM_FILTER_UNIT_TEST_ /** FIXME: We are not getting 5 bit positions in testing */
+		printk(KERN_INFO "Inserting bit pos=%d %d.\n", bit, count);
 #endif /* _BLOOM_FILTER_UNIT_TEST_ */
 		if(ret < 0){
 			goto exit;
@@ -315,7 +335,8 @@ int bloom_filter_check(struct bloom_filter *filter, const __u8 *data, __u32 size
 	struct bloom_crypto_alg *alg;
 	struct scatterlist sg;
 	int ret = 0;
-	__u32 bit1 = 0, bit2 = 0;
+	__u32 bit1 = 0, bit2 = 0, count = 0;
+	bool bit1_hashed = false, bit2_hashed = false;
 
 	if(list_empty(&filter->alg_list)){
 		ret = -EINVAL;
@@ -328,31 +349,32 @@ int bloom_filter_check(struct bloom_filter *filter, const __u8 *data, __u32 size
 
 	list_for_each_entry(alg, &filter->alg_list, node){
 		__u32 bit;
-		switch(alg->order){
-			case 1:
+		count ++;
+		if(alg->is_dummy){
+			bit = (bit1 + (alg->order) * bit2) % filter->bitmap_size;
+		}
+		else{
+			if(!bit1_hashed){
 				ret = __bit_for_crypto_alg(alg, &sg, filter->bitmap_size, &bit);
 				bit1 = bit;
-				break;
-			case 2:
+				bit1_hashed = true;
+			}
+			else if (!bit2_hashed){
 				ret = __bit_for_crypto_alg(alg, &sg, filter->bitmap_size, &bit);
 				bit2 = bit;
-				break;
-			default:
-				if(alg->is_dummy){
-					bit = (bit1 + (alg->order) * bit2) % filter->bitmap_size;
-				}
-				else{
-					ret = __bit_for_crypto_alg(alg, &sg, filter->bitmap_size, &bit);
-				}
-				break;
+				bit2_hashed = true;
+			}
+			else{
+				ret = __bit_for_crypto_alg(alg, &sg, filter->bitmap_size, &bit);
+			}
 		}
-
-		if (ret < 0){
+#ifdef _BLOOM_FILTER_UNIT_TEST_ /** FIXME: We are not getting 5 bit positions in testing */
+		printk(KERN_INFO "Checking bit pos=%d %d.\n", bit, count);
+#endif /* _BLOOM_FILTER_UNIT_TEST_ */
+		if(ret < 0){
 			goto exit;
 		}
-#ifdef _BLOOM_FILTER_UNIT_TEST_
-		printk(KERN_INFO "Checking bit pos=%d.\n", bit);
-#endif /* _BLOOM_FILTER_UNIT_TEST_ */
+
 		if (!test_bit(bit, filter->bitmap)){
 			*result = false;
 			break;
@@ -491,13 +513,13 @@ int bloom_filter_print_each_hash_digest(struct bloom_filter *filter, const __u8 
 int run_testing(void){
 
 	struct bloom_filter * filter = bloom_filter_create(1024);
-	char str1[] = "name";
-	char str2[] = "hash";
-	char str3[] = "function";
+	char str1[] = "name_balabala";
+	char str2[] = "hash_longlonglonglonglong";
+	char str3[] = "function_is_fully_working!";
 	bool result = true;
 	int ret;
 
-	printk(KERN_WARNING "\nTesting hash function:\n");
+	printk(KERN_WARNING "Testing hash function:\n");
 	ret = bloom_filter_add_hash_alg(filter, "sha1");
 	if (ret < 0){
 		printk(KERN_WARNING "Adding sha1 failed.\n");
@@ -522,8 +544,8 @@ int run_testing(void){
 	}
 	bloom_filter_unref(filter);
 
-	printk(KERN_WARNING "\nTesting inserting function:\n");
-	filter = bloom_filter_create_n(150000000, 5);
+	printk(KERN_WARNING "Testing inserting function:\n");
+	filter = bloom_filter_create_n(15000000, 5);
 	
 	ret = bloom_filter_insert(filter, str1, sizeof(str1) - 1);
 	if (ret < 0){
