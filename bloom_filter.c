@@ -263,7 +263,7 @@ int __bit_for_crypto_alg(struct bloom_crypto_alg *alg,
 	temp = 0;
 	for(i = 0; i<alg->len; i++)
 	{
-		temp += alg->data[i] * wrap_size / 256;
+		temp += (alg->data[i] * wrap_size) >> 8;
 #ifdef _BLOOM_FILTER_UNIT_TEST_
 		printk("%02x ", alg->data[i]);
 #endif /* _BLOOM_FILTER_UNIT_TEST_*/
