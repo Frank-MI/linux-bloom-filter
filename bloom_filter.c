@@ -263,10 +263,17 @@ int __bit_for_crypto_alg(struct bloom_crypto_alg *alg,
 	temp = 0;
 	for(i = 0; i<alg->len; i++)
 	{
-		temp += (alg->data[i] * wrap_size) >> 8;
 #ifdef _BLOOM_FILTER_UNIT_TEST_
 		printk("%02x ", alg->data[i]);
 #endif /* _BLOOM_FILTER_UNIT_TEST_*/
+		if(i < 3){
+			continue;
+		}
+		temp += (alg->data[i-3]<<24 + \
+				alg->data[i-2]<<16 + \
+				alg->data[i-1]<<8 + \
+				alg->data[i]);
+
 		temp %= wrap_size;
 	}
 
@@ -320,7 +327,7 @@ int bloom_filter_insert(struct bloom_filter *filter, const __u8 *data, __u32 siz
 				ret = __bit_for_crypto_alg(alg, &sg, filter->bitmap_size, &bit);
 			}
 		}
-#ifdef _BLOOM_FILTER_UNIT_TEST_ /** FIXME: We are not getting 5 bit positions in testing */
+#ifdef _BLOOM_FILTER_UNIT_TEST_
 		printk(KERN_INFO "Inserting bit pos=%d %d.\n", bit, count);
 #endif /* _BLOOM_FILTER_UNIT_TEST_ */
 		if(ret < 0){
@@ -378,7 +385,7 @@ int bloom_filter_check(struct bloom_filter *filter, const __u8 *data, __u32 size
 				ret = __bit_for_crypto_alg(alg, &sg, filter->bitmap_size, &bit);
 			}
 		}
-#ifdef _BLOOM_FILTER_UNIT_TEST_ /** FIXME: We are not getting 5 bit positions in testing */
+#ifdef _BLOOM_FILTER_UNIT_TEST_
 		printk(KERN_INFO "Checking bit pos=%d %d.\n", bit, count);
 #endif /* _BLOOM_FILTER_UNIT_TEST_ */
 		if(ret < 0){
@@ -549,8 +556,8 @@ int run_testing(void){
 	}
 	else{
 		printk(KERN_INFO "Correct answer reference:\n");
-		printk(KERN_INFO "6a e9 99 55 2a 0d 2d ca 14 d6 2e 2b c8 b7 64 d3 77 b1 dd 6c\n");
-		printk(KERN_INFO "0c c1 75 b9 c0 f1 b6 a8 31 c3 99 e2 69 77 26 61\n");
+		printk(KERN_INFO "a3 a3 5b 22 74 8f db 76 7b b8 92 ee 59 c7 d4 05 53 27 3c ff\n");
+		printk(KERN_INFO "ea 04 99 f2 be 7a 2a 82 4c a2 0f ec 01 1c bf 3b\n");
 	}
 	bloom_filter_unref(filter);
 
