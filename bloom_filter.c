@@ -75,9 +75,9 @@ struct bloom_filter * bloom_filter_create(__u32 bitsize)
 	__u32 bitmap_bytes = bitsize%8 ? (bitsize/8) + 1 : (bitsize/8);
 
 	filter = kzalloc(sizeof(struct bloom_filter), GFP_KERNEL);
-	printk(KERN_INFO "bitmap size = %d\n", bitmap_bytes);
+	// printk(KERN_INFO "bitmap size = %d\n", bitmap_bytes);
 	filter->bitmap = kzalloc(bitmap_bytes, GFP_KERNEL);
-	printk(KERN_INFO "bitmap address = %p", filter->bitmap);
+	// printk(KERN_INFO "bitmap address = %p", filter->bitmap);
 	if(!filter || !filter->bitmap)
 		return ERR_PTR(-ENOMEM);
 
@@ -105,9 +105,9 @@ struct bloom_filter * bloom_filter_create_n(__u32 bitsize, __u32 num_algs)
 	__u32 bitmap_bytes = bitsize%8 ? (bitsize/8) + 1 : (bitsize/8);
 
 	filter = kzalloc(sizeof(struct bloom_filter), GFP_KERNEL);
-	printk(KERN_INFO "bitmap size = %d\n", bitmap_bytes);
+	// printk(KERN_INFO "bitmap size = %d\n", bitmap_bytes);
 	filter->bitmap = kzalloc(bitmap_bytes, GFP_KERNEL);
-	printk(KERN_INFO "bitmap address = %p", filter->bitmap);
+	// printk(KERN_INFO "bitmap address = %p", filter->bitmap);
 	if(!filter|| !filter->bitmap)
 		return ERR_PTR(-ENOMEM);
 
@@ -410,7 +410,7 @@ int bloom_filter_insert(struct bloom_filter *filter, const __u8 *data, __u32 siz
 	__u32 bit1 = 0, bit2 = 0;
 	bool bit1_hashed = false, bit2_hashed = false;
 
-	printk("Start Inserting.\n");
+	// printk("Start Inserting.\n");
 
 	if (list_is_singular(&(filter->alg_list))){
 		ret = -EINVAL;
@@ -459,9 +459,9 @@ int bloom_filter_insert(struct bloom_filter *filter, const __u8 *data, __u32 siz
 			goto exit;
 		}
 
-		printk(KERN_INFO "Setting bit %d\n", bit);
+		// printk(KERN_INFO "Setting bit %d\n", bit);
 		__set_bit(bit, filter->bitmap);
-		bloom_filter_print_bitmap(filter);
+		// bloom_filter_print_bitmap(filter);
 	}
 
 exit:
