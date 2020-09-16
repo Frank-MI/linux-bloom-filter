@@ -1,11 +1,17 @@
-/*
+/**
  * Copyright (C) 2013 Daniel Mack <daniel@zonque.org>
  * Modified by Yu Mi <yxm319@case.edu>.
  * Bloom filter implementation.
  * See https://en.wikipedia.org/wiki/Bloom_filter
  */
-
+/**
+ * Code Modified by Yu Mi to implement the bloom filter to filter out packets,
+ * reference include:
+ * https://github.com/zonque/linux-bloom-filter/
+ * https://www.eecs.harvard.edu/~michaelm/postscripts/tr-02-05.pdf
+ */
 #define pr_fmt(fmt)	KBUILD_MODNAME ": " fmt
+#define _BLOOM_FILTER_SHORT_HASH_ // Enable this to use jhash and murmur32
 
 #include <linux/module.h>
 #include <linux/init.h>
@@ -15,18 +21,24 @@
 #include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/hash.h>
+#include <linux/jhash.h>
 #include <linux/kref.h>
+#include <linux/scatterlist.h>
 #include <crypto/algapi.h>
 #include <crypto/hash.h>
 
 #include "bloom_filter.h"
+
+#ifdef _BLOOM_FILTER_SHORT_HASH_
+int bloom_filter_add_short_hash(struct bloom_filter * filter, __u32 order);
+#endif /* _BLOOM_FILTER_SHORT_HASH_ */
 
 #define _BLOOM_FILTER_UNIT_TEST_
 #undef _BLOOM_FILTER_UNIT_TEST_
 
 struct bloom_crypto_alg{
 	__u8					*data;
-	__u16					order; // the order of this crypto algorithm
+	__u32					order; // the order of this crypto algorithm
 	__u32					len;
 	bool					hash_tfm_allocated;
 	bool					is_dummy;
@@ -35,6 +47,24 @@ struct bloom_crypto_alg{
 	struct list_head		node;
 };
 
+/** bloom_filter_print_bitmap - prints the bitmap for debugging
+ * NOTE: Printing a bitmap too long will be time consuming!!!
+ */
+int bloom_filter_print_bitmap(struct bloom_filter * filter)
+{
+	__u32 i;
+
+	printk(KERN_INFO "Printing bitmap for bloom filter at %p.\n", filter);
+	for(i = 0; i < (filter->bitmap_bytes)/4; i++){
+		printk("%08x ", filter->bitmap[i]);
+		if(!((i+1) % 8)){
+			printk("\n");
+		}
+	}
+
+	return 0;
+}
+
 /** bloom_filter_create - create a bloom filter instance
  * @bitsize: the length of bloom filter
  */
@@ -42,15 +72,18 @@ struct bloom_filter * bloom_filter_create(__u32 bitsize)
 {
 	struct bloom_filter *filter;
 	__u32 i = 0, ret = 0;
-	__u32 bitmap_size = bitsize%32 ? (bitsize>>5) + 1 : (bitsize>>5);
+	__u32 bitmap_bytes = bitsize%8 ? (bitsize/8) + 1 : (bitsize/8);
 
-	filter = kzalloc(sizeof(struct bloom_filter) + bitmap_size, GFP_KERNEL);
-	if(!filter)
+	filter = kzalloc(sizeof(struct bloom_filter), GFP_KERNEL);
+	printk(KERN_INFO "bitmap size = %d\n", bitmap_bytes);
+	filter->bitmap = kzalloc(bitmap_bytes, GFP_KERNEL);
+	printk(KERN_INFO "bitmap address = %p", filter->bitmap);
+	if(!filter || !filter->bitmap)
 		return ERR_PTR(-ENOMEM);
 
 	kref_init(&filter->ref_count);
 	filter->bitmap_size = bitsize;
-	filter->bitmap_bytes = bitmap_size;
+	filter->bitmap_bytes = bitmap_bytes;
 	filter->num_algs = 0;
 	INIT_LIST_HEAD(&(filter->alg_list));
 
@@ -69,28 +102,43 @@ struct bloom_filter * bloom_filter_create_n(__u32 bitsize, __u32 num_algs)
 {
 	struct bloom_filter *filter;
 	__u32 i = 0, ret = 0;
-	__u32 bitmap_size = bitsize%32 ? (bitsize>>5) + 1 : (bitsize>>5);
+	__u32 bitmap_bytes = bitsize%8 ? (bitsize/8) + 1 : (bitsize/8);
 
-	filter = kzalloc(sizeof(struct bloom_filter) + bitmap_size, GFP_KERNEL);
-	if(!filter)
+	filter = kzalloc(sizeof(struct bloom_filter), GFP_KERNEL);
+	printk(KERN_INFO "bitmap size = %d\n", bitmap_bytes);
+	filter->bitmap = kzalloc(bitmap_bytes, GFP_KERNEL);
+	printk(KERN_INFO "bitmap address = %p", filter->bitmap);
+	if(!filter|| !filter->bitmap)
 		return ERR_PTR(-ENOMEM);
 
 	kref_init(&filter->ref_count);
 	filter->bitmap_size = bitsize;
-	filter->bitmap_bytes = bitmap_size;
+	filter->bitmap_bytes = bitmap_bytes;
 	filter->num_algs = num_algs;
 	INIT_LIST_HEAD(&(filter->alg_list));
 
 	for(i = 0; i< num_algs; i++){
 		switch (i){
 		case 0:
+#ifndef _BLOOM_FILTER_SHORT_HASH_
 			ret = bloom_filter_add_hash_alg(filter, "sha1");
+#else
+			ret = bloom_filter_add_short_hash(filter, 0);
+#endif /* _BLOOM_FILTER_SHORT_HASH_ */
 			break;
 		case 1:
+#ifndef _BLOOM_FILTER_SHORT_HASH_
 			ret = bloom_filter_add_hash_alg(filter, "md5");
+#else
+			ret = bloom_filter_add_short_hash(filter, 1);
+#endif /* _BLOOM_FILTER_SHORT_HASH_ */
 			break;
 		default:
+#ifndef _BLOOM_FILTER_SHORT_HASH_
 			ret = bloom_filter_add_hash_alg(filter, "dummy");
+#else
+			ret = bloom_filter_add_short_hash(filter, i);
+#endif /* _BLOOM_FILTER_SHORT_HASH_ */
 			break;
 		}
 		if(ret < 0){
@@ -103,6 +151,40 @@ struct bloom_filter * bloom_filter_create_n(__u32 bitsize, __u32 num_algs)
 #endif /* _BLOOM_FILTER_UNIT_TEST_ */
 	return filter;
 }
+
+#ifdef _BLOOM_FILTER_SHORT_HASH_
+/** bloom_filter_add_short_hash - add a short hash algorithm into the alg list
+ * @filter: the filter to add hash algorithm
+ * @order: the order of this hash algorithm
+ */
+int bloom_filter_add_short_hash(struct bloom_filter * filter, __u32 order)
+{
+	struct bloom_crypto_alg *alg;
+	int ret = 0;
+
+	alg = kzalloc(sizeof(struct bloom_crypto_alg), GFP_KERNEL);
+	if(!alg){
+		ret = -ENOMEM;
+		goto exit;
+	}
+
+	if(order < 2){ // is not dummy
+		alg->is_dummy = false;
+	}
+	else{
+		alg->is_dummy = true;
+	}
+
+	alg->order = order;
+	alg->hash_tfm_allocated = false;
+
+	list_add_tail(&(alg->node), &(filter->alg_list));
+	filter->num_algs ++;
+
+exit:
+	return ret;
+}
+#endif /* _BLOOM_FILTER_SHORT_HASH_ */
 
 /** bloom_filter_add_hash_alg - add a hash algorithm to this bloom filter
  * @filter: the filter to add hash algorithm
@@ -120,7 +202,7 @@ int bloom_filter_add_hash_alg(struct bloom_filter *filter, const char *name)
 		goto exit;
 	}
 
-	if(memcmp(name_dummy, name, sizeof(name_dummy))){ // is not dummy
+	if(memcmp(name_dummy, name, min(sizeof(name_dummy), sizeof(name)))){ // is not dummy
 		alg->is_dummy = false;
 	}
 	else{
@@ -225,6 +307,35 @@ err_create_data:
 exit:
 	return ret;
 }
+
+#ifdef _BLOOM_FILTER_SHORT_HASH_
+int __bit_for_crypto_alg_short(struct bloom_crypto_alg *alg,
+							   const __u8 * data,
+							   __u32 size,
+							   __u32 wrap_size,
+							   __u32 *bit)
+{
+	__u32 hash_res = 0;
+
+	switch (alg->order)
+	{
+	case 0: // jekins hash
+		hash_res = jhash(data, size, 0xdeadbeef);
+		break;
+	case 1: // murmur3 hash
+		hash_res = murmur32_hash(data, size, 0xdeadbeef);
+		break;
+	default:
+		hash_res = hash_ptr(data, size); /** FIXME: Not an ideal hash function */
+		break;
+	}
+
+	hash_res %= wrap_size;
+	*bit = hash_res;
+	return 0;
+}
+#endif /* _BLOOM_FILTER_SHORT_HASH_ */
+
 /** __bit_for_crypto_alg -- generate a bit position from hashing algorithm
  * @alg: the hash algorithm
  * @sg: scatter list for memory mapping hashing data
@@ -263,10 +374,17 @@ int __bit_for_crypto_alg(struct bloom_crypto_alg *alg,
 	temp = 0;
 	for(i = 0; i<alg->len; i++)
 	{
-		temp += alg->data[i] * wrap_size / 256;
 #ifdef _BLOOM_FILTER_UNIT_TEST_
 		printk("%02x ", alg->data[i]);
 #endif /* _BLOOM_FILTER_UNIT_TEST_*/
+		if(i < 3){
+			continue;
+		}
+		temp += ((alg->data[i-3]<<24) + \
+				 (alg->data[i-2]<<16) + \
+				 (alg->data[i-1]<<8) + \
+				 (alg->data[i]));
+
 		temp %= wrap_size;
 	}
 
@@ -292,7 +410,9 @@ int bloom_filter_insert(struct bloom_filter *filter, const __u8 *data, __u32 siz
 	__u32 bit1 = 0, bit2 = 0;
 	bool bit1_hashed = false, bit2_hashed = false;
 
-	if (list_empty(&(filter->alg_list))){
+	printk("Start Inserting.\n");
+
+	if (list_is_singular(&(filter->alg_list))){
 		ret = -EINVAL;
 		goto exit;
 	}
@@ -307,27 +427,41 @@ int bloom_filter_insert(struct bloom_filter *filter, const __u8 *data, __u32 siz
 		}
 		else{
 			if(!bit1_hashed){
+#ifndef _BLOOM_FILTER_SHORT_HASH_
 				ret = __bit_for_crypto_alg(alg, &sg, filter->bitmap_size, &bit);
+#else
+				ret = __bit_for_crypto_alg_short(alg, data, size, filter->bitmap_size, &bit);
+#endif /* _BLOOM_FILTER_SHORT_HASH_ */
 				bit1 = bit;
 				bit1_hashed = true;
 			}
 			else if (!bit2_hashed){
+#ifndef _BLOOM_FILTER_SHORT_HASH_
 				ret = __bit_for_crypto_alg(alg, &sg, filter->bitmap_size, &bit);
+#else
+				ret = __bit_for_crypto_alg_short(alg, data, size, filter->bitmap_size, &bit);
+#endif /* _BLOOM_FILTER_SHORT_HASH_ */
 				bit2 = bit;
 				bit2_hashed = true;
 			}
 			else{
+#ifndef _BLOOM_FILTER_SHORT_HASH_
 				ret = __bit_for_crypto_alg(alg, &sg, filter->bitmap_size, &bit);
+#else
+				ret = __bit_for_crypto_alg_short(alg, data, size, filter->bitmap_size, &bit);
+#endif /* _BLOOM_FILTER_SHORT_HASH_ */
 			}
 		}
-#ifdef _BLOOM_FILTER_UNIT_TEST_ /** FIXME: We are not getting 5 bit positions in testing */
+#ifdef _BLOOM_FILTER_UNIT_TEST_
 		printk(KERN_INFO "Inserting bit pos=%d %d.\n", bit, count);
 #endif /* _BLOOM_FILTER_UNIT_TEST_ */
 		if(ret < 0){
 			goto exit;
 		}
 
-		set_bit(bit, filter->bitmap);
+		printk(KERN_INFO "Setting bit %d\n", bit);
+		__set_bit(bit, filter->bitmap);
+		bloom_filter_print_bitmap(filter);
 	}
 
 exit:
@@ -365,21 +499,33 @@ int bloom_filter_check(struct bloom_filter *filter, const __u8 *data, __u32 size
 		}
 		else{
 			if(!bit1_hashed){
+#ifndef _BLOOM_FILTER_SHORT_HASH_
 				ret = __bit_for_crypto_alg(alg, &sg, filter->bitmap_size, &bit);
+#else
+				ret = __bit_for_crypto_alg_short(alg, data, size, filter->bitmap_size, &bit);
+#endif /* _BLOOM_FILTER_SHORT_HASH_ */
 				bit1 = bit;
 				bit1_hashed = true;
 			}
 			else if (!bit2_hashed){
+#ifndef _BLOOM_FILTER_SHORT_HASH_
 				ret = __bit_for_crypto_alg(alg, &sg, filter->bitmap_size, &bit);
+#else
+				ret = __bit_for_crypto_alg_short(alg, data, size, filter->bitmap_size, &bit);
+#endif /* _BLOOM_FILTER_SHORT_HASH_ */
 				bit2 = bit;
 				bit2_hashed = true;
 			}
 			else{
+#ifndef _BLOOM_FILTER_SHORT_HASH_
 				ret = __bit_for_crypto_alg(alg, &sg, filter->bitmap_size, &bit);
+#else
+				ret = __bit_for_crypto_alg_short(alg, data, size, filter->bitmap_size, &bit);
+#endif /* _BLOOM_FILTER_SHORT_HASH_ */
 			}
 		}
-#ifdef _BLOOM_FILTER_UNIT_TEST_ /** FIXME: We are not getting 5 bit positions in testing */
-		printk(KERN_INFO "Checking bit pos=%d %d.\n", bit, count);
+#ifdef _BLOOM_FILTER_UNIT_TEST_
+		printk(KERN_INFO "Checking bit pos=%d %d.\n", bit, alg->order);
 #endif /* _BLOOM_FILTER_UNIT_TEST_ */
 		if(ret < 0){
 			goto exit;
@@ -390,6 +536,7 @@ int bloom_filter_check(struct bloom_filter *filter, const __u8 *data, __u32 size
 			break;
 		}
 	}
+
 
 exit:
 	return ret;
@@ -463,11 +610,13 @@ void bloom_filter_bitmap_clear(struct bloom_filter *filter)
 
 /** bloom_filter_get_hash_digest - get a hash digest for input scatterlist
  * NOTE: the data is put into the algorithm's data element
+ * @filter: the bloom filter
  * @alg: the hash algorithm
  * @data: the data to be hashed
  * @size: the size of data
  */
-int __bloom_filter_get_hash_digest(struct bloom_crypto_alg * alg,
+int __bloom_filter_get_hash_digest(struct bloom_filter * filter,
+								   struct bloom_crypto_alg * alg,
 								   const __u8 *data,
 								   __u32 size)
 {
@@ -475,7 +624,7 @@ int __bloom_filter_get_hash_digest(struct bloom_crypto_alg * alg,
 	struct scatterlist sg;
 	__u32 i, temp;
 	int ret;
-
+#ifndef _BLOOM_FILTER_SHORT_HASH_
 	sg_init_one(&sg, data, size);
 
 	desc.flags = CRYPTO_TFM_REQ_MAY_SLEEP;
@@ -491,8 +640,16 @@ int __bloom_filter_get_hash_digest(struct bloom_crypto_alg * alg,
 	if (ret < 0){
 		return ret;
 	}
-
-	return 0;
+#else
+	alg->data = kzalloc(sizeof(__u32), GFP_KERNEL);
+	alg->len = sizeof(__u32);
+	if(IS_ERR(alg->data)){
+		ret = -ENOMEM;
+		return ret;
+	}
+	ret = __bit_for_crypto_alg_short(alg, data, size, filter->bitmap_size, alg->data);
+#endif /* _BLOOM_FILTER_SHORT_HASH_ */
+	return ret;
 }
 
 /** bloom_filter_print_each_hash_digest - print hash digest for each algorithm
@@ -507,7 +664,7 @@ int bloom_filter_print_each_hash_digest(struct bloom_filter *filter, const __u8 
 	__u32 i;
 
 	list_for_each_entry(alg, &(filter->alg_list), node){
-		ret = __bloom_filter_get_hash_digest(alg, data, size);
+		ret = __bloom_filter_get_hash_digest(filter, alg, data, size);
 		if (ret < 0){
 			return ret;
 		}
@@ -519,17 +676,57 @@ int bloom_filter_print_each_hash_digest(struct bloom_filter *filter, const __u8 
 	}
 }
 
+/** bloom_filter_hamming_weight_u32 - returns a hamming weight for a u32 value
+ * @input: the input value
+ */
+inline int __bloom_filter_hamming_weight_u32(__u32 input)
+{
+	input = input - ((input >> 1) & 0x55555555);
+	input = (input & 0x33333333) + ((input >> 2) & 0x33333333);
+	input = (((input + (input >> 4)) & 0xF0F0F0F) * 0x1010101) >> 24;
+
+	return input;
+}
+
+/** bloom_filter_hamming_weight - gives the hamming weight of the filter's bitset
+ * @filter: the bloom filter
+ * @weight: the weight of the bitset
+ */
+int bloom_filter_hamming_weight(struct bloom_filter *filter, __u32 *weight)
+{
+	__u32 i, temp = 0;
+	*weight = 0;
+
+	for(i = 0; i< (filter->bitmap_bytes) /4; i++){
+		temp = __bloom_filter_hamming_weight_u32(filter->bitmap[i]);
+		*weight += temp;
+	}
+
+	return 0;
+}
+
+
+
 #ifdef _BLOOM_FILTER_UNIT_TEST_
 int run_testing(void){
 
-	struct bloom_filter * filter = bloom_filter_create(1024);
+	struct bloom_filter * filter;
 	char str1[] = "name_balabala";
 	char str2[] = "hash_longlonglonglonglong";
 	char str3[] = "function_is_fully_working!";
 	bool result = true;
-	int ret;
+	int ret, i;
+	__u32 hamming_weight = 0;
 
+	filter = bloom_filter_create(1024);
+	if(IS_ERR(filter)){
+		printk(KERN_WARNING "Creating bloom filter failed %p.\n", filter);
+		goto jump_over_t1;
+	}
+	bloom_filter_print_bitmap(filter);
 	printk(KERN_WARNING "Testing hash function:\n");
+
+#ifndef _BLOOM_FILTER_SHORT_HASH_
 	ret = bloom_filter_add_hash_alg(filter, "sha1");
 	if (ret < 0){
 		printk(KERN_WARNING "Adding sha1 failed.\n");
@@ -541,21 +738,45 @@ int run_testing(void){
 		printk(KERN_WARNING "Adding md5 failed.\n");
 		return ret;
 	}
+#else
+	ret = bloom_filter_add_short_hash(filter, 0);
+	if (ret < 0){
+		printk(KERN_WARNING "Adding jhash failed.\n");
+		return ret;
+	}
+
+	ret = bloom_filter_add_short_hash(filter, 1);
+	if (ret < 0){
+		printk(KERN_WARNING "Adding murmurhash failed.\n");
+		return ret;
+	}
+#endif /* _BLOOM_FILTER_SHORT_HASH_ */
 
 	ret = bloom_filter_print_each_hash_digest(filter, str1, sizeof(str1) -1);
+#ifndef _BLOOM_FILTER_SHORT_HASH_
 	if(ret < 0){
 		printk(KERN_WARNING "Error computing hash");
 		return ret;
 	}
 	else{
 		printk(KERN_INFO "Correct answer reference:\n");
-		printk(KERN_INFO "6a e9 99 55 2a 0d 2d ca 14 d6 2e 2b c8 b7 64 d3 77 b1 dd 6c\n");
-		printk(KERN_INFO "0c c1 75 b9 c0 f1 b6 a8 31 c3 99 e2 69 77 26 61\n");
+		printk(KERN_INFO "a3 a3 5b 22 74 8f db 76 7b b8 92 ee 59 c7 d4 05 53 27 3c ff\n");
+		printk(KERN_INFO "ea 04 99 f2 be 7a 2a 82 4c a2 0f ec 01 1c bf 3b\n");
 	}
+#endif /* _BLOOM_FILTER_SHORT_HASH */
+
 	bloom_filter_unref(filter);
 
+jump_over_t1:
 	printk(KERN_WARNING "Testing inserting function:\n");
-	filter = bloom_filter_create_n(15000000, 5);
+	filter = bloom_filter_create_n(1536, 5);
+
+	if(IS_ERR(filter)){
+		printk(KERN_WARNING "Creating bloom filter failed %p.\n", filter);
+		goto jump_over_t2;
+	}
+
+	bloom_filter_print_bitmap(filter);
 
 	ret = bloom_filter_insert(filter, str1, sizeof(str1) - 1);
 	if (ret < 0){
@@ -563,10 +784,30 @@ int run_testing(void){
 		return ret;
 	}
 
+	ret = bloom_filter_print_bitmap(filter);
+
+	ret = bloom_filter_hamming_weight(filter, &hamming_weight);
+	if (ret < 0){
+		printk(KERN_INFO "Checking hamming weight failed.\b");
+	}
+	else{
+		printk(KERN_INFO "The hammming weight of filter is %d.\n", hamming_weight);
+	}
+
 	ret = bloom_filter_insert(filter, str2, sizeof(str2) - 1);
 	if (ret < 0){
 		printk(KERN_INFO "Inserting \"s\" error.\n", str2);
 		return ret;
+	}
+
+	ret = bloom_filter_print_bitmap(filter);
+
+	ret = bloom_filter_hamming_weight(filter, &hamming_weight);
+	if (ret < 0){
+		printk(KERN_INFO "Checking hamming weight failed.\b");
+	}
+	else{
+		printk(KERN_INFO "The hammming weight of filter is %d.\n", hamming_weight);
 	}
 
 	ret = bloom_filter_check(filter, str3, sizeof(str3) - 1, &result);
@@ -587,7 +828,50 @@ int run_testing(void){
 		printk(KERN_INFO "Checking entry, should be 1, result is %d\n", result);
 	}
 
+	ret = bloom_filter_hamming_weight(filter, &hamming_weight);
+	if (ret < 0){
+		printk(KERN_INFO "Checking hamming weight failed.\b");
+	}
+	else{
+		printk(KERN_INFO "The hammming weight of filter is %d.\n", hamming_weight);
+	}
+
 	bloom_filter_unref(filter);
+
+jump_over_t2:
+	filter = bloom_filter_create_n(128, 5);
+	bloom_filter_print_bitmap(filter);
+
+	if(IS_ERR(filter)){
+		printk(KERN_WARNING "Creating bloom filter failed %p.\n", filter);
+		goto jump_over_t3;
+	}
+	ret = bloom_filter_insert(filter, str1, sizeof(str1) - 1);
+	if (ret < 0){
+		printk(KERN_INFO "Inserting \"%s\" error.\n", str1);
+		return ret;
+	}
+
+	ret = bloom_filter_insert(filter, str2, sizeof(str2) - 1);
+	if (ret < 0){
+		printk(KERN_INFO "Inserting \"s\" error.\n", str2);
+		return ret;
+	}
+
+	bloom_filter_print_bitmap(filter);
+
+	ret = bloom_filter_hamming_weight(filter, &hamming_weight);
+	if (ret < 0){
+		printk(KERN_INFO "Checking hamming weight failed.\b");
+	}
+	else{
+		printk(KERN_INFO "The hammming weight of filter is %d.\n", hamming_weight);
+	}
+
+	bloom_filter_unref(filter);
+
+jump_over_t3:
+
 	return ret;
 }
 
