@@ -22,6 +22,7 @@
 #include <linux/sched.h>
 #include <linux/hash.h>
 #include <linux/jhash.h>
+#include <linux/spinlock_types.h>
 #include <linux/kref.h>
 #include <linux/scatterlist.h>
 #include <crypto/algapi.h>
@@ -82,6 +83,7 @@ struct bloom_filter * bloom_filter_create(__u32 bitsize)
 		return ERR_PTR(-ENOMEM);
 
 	kref_init(&filter->ref_count);
+	spin_lock_init(&filter->spinlock);
 	filter->bitmap_size = bitsize;
 	filter->bitmap_bytes = bitmap_bytes;
 	filter->num_algs = 0;
@@ -112,6 +114,7 @@ struct bloom_filter * bloom_filter_create_n(__u32 bitsize, __u32 num_algs)
 		return ERR_PTR(-ENOMEM);
 
 	kref_init(&filter->ref_count);
+	spin_lock_init(&filter->spinlock);
 	filter->bitmap_size = bitsize;
 	filter->bitmap_bytes = bitmap_bytes;
 	filter->num_algs = num_algs;
@@ -178,7 +181,10 @@ int bloom_filter_add_short_hash(struct bloom_filter * filter, __u32 order)
 	alg->order = order;
 	alg->hash_tfm_allocated = false;
 
+	spin_lock(&filter->spinlock);
 	list_add_tail(&(alg->node), &(filter->alg_list));
+	spin_unlock(&filter->spinlock);
+
 	filter->num_algs ++;
 
 exit:
@@ -232,7 +238,9 @@ int bloom_filter_add_hash_alg(struct bloom_filter *filter, const char *name)
 		alg->order = last->order + 1;
 	}
 
+	spin_lock(&filter->spinlock);
 	list_add_tail(&(alg->node), &(filter->alg_list));
+	spin_unlock(&filter->spinlock);
 
 	filter->num_algs ++;
 
@@ -248,7 +256,9 @@ is_dummy_out:
 		alg->order = last->order + 1;
 	}
 
+	spin_lock(&filter->spinlock);
 	list_add_tail(&(alg->node), &(filter->alg_list));
+	spin_unlock(&filter->spinlock);
 
 	filter->num_algs ++;
 
@@ -295,7 +305,9 @@ int bloom_filter_add_crypto_hash(struct bloom_filter *filter, struct crypto_hash
 		alg->order = last->order + 1;
 	}
 
+	spin_lock(&filter->spinlock);
 	list_add_tail(&alg->node, &filter->alg_list);
+	spin_unlock(&filter->spinlock);
 
 	filter->num_algs ++;
 
@@ -412,6 +424,7 @@ int bloom_filter_insert(struct bloom_filter *filter, const __u8 *data, __u32 siz
 
 	// printk("Start Inserting.\n");
 
+	spin_lock(&filter->spinlock);
 	if (list_is_singular(&(filter->alg_list))){
 		ret = -EINVAL;
 		goto exit;
@@ -465,6 +478,7 @@ int bloom_filter_insert(struct bloom_filter *filter, const __u8 *data, __u32 siz
 	}
 
 exit:
+	spin_unlock(&filter->spinlock);
 	return ret;
 }
 
@@ -482,6 +496,7 @@ int bloom_filter_check(struct bloom_filter *filter, const __u8 *data, __u32 size
 	__u32 bit1 = 0, bit2 = 0, count = 0;
 	bool bit1_hashed = false, bit2_hashed = false;
 
+	spin_lock(&filter->spinlock);
 	if(list_empty(&filter->alg_list)){
 		ret = -EINVAL;
 		goto exit;
@@ -539,6 +554,7 @@ int bloom_filter_check(struct bloom_filter *filter, const __u8 *data, __u32 size
 
 
 exit:
+	spin_unlock(&filter->spinlock);
 	return ret;
 }
 
@@ -572,9 +588,11 @@ static void __bloom_filter_free(struct kref *kref)
 	struct bloom_crypto_alg *alg, *tmp;
 	struct bloom_filter *filter = container_of(kref, struct bloom_filter, ref_count);
 
+	spin_lock(&filter->spinlock);
 	list_for_each_entry_safe(alg, tmp, &filter->alg_list, node)
 		bloom_crypto_alg_free(alg);
 
+	spin_unlock(&filter->spinlock);
 	kfree(filter);
 #ifdef _BLOOM_FILTER_UNIT_TEST_
 	printk(KERN_WARNING "Bloom filter destroyed.\n");
@@ -596,7 +614,9 @@ void bloom_filter_unref(struct bloom_filter *filter)
  */
 void bloom_filter_bitmap_set(struct bloom_filter *filter, const __u8 *data)
 {
+	spin_lock(&filter->spinlock);
 	memcpy(filter->bitmap, data, filter->bitmap_bytes);
+	spin_unlock(&filter->spinlock);
 }
 
 /** bloom_filter_bitmap_clear - clear the bitmap in a bloom filter
@@ -604,8 +624,10 @@ void bloom_filter_bitmap_set(struct bloom_filter *filter, const __u8 *data)
  */
 void bloom_filter_bitmap_clear(struct bloom_filter *filter)
 {
+	spin_lock(&filter->spinlock);
 	if(filter->bitmap) // Only clear available bitmaps
 		bitmap_zero(filter->bitmap, filter->bitmap_size);
+	spin_unlock(&filter->spinlock);
 }
 
 /** bloom_filter_get_hash_digest - get a hash digest for input scatterlist

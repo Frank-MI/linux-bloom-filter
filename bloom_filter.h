@@ -7,19 +7,21 @@
 
 #ifndef _BLOOM_FILTER_H_
 #define _BLOOM_FILTER_H_
+
+#include <linux/spinlock_types.h>
 #include <crypto/algapi.h>
 #include <crypto/hash.h>
 
 struct bloom_filter {
 	struct kref				ref_count;
 
+	struct spinlock			spinlock;
 	struct list_head		alg_list;
 	__u32					num_algs;
 	__u32					bitmap_size;
 	__u32					bitmap_bytes;
 	__u32					*bitmap;
 };
-
 /** Creating and disassembling function */
 
 struct bloom_filter * bloom_filter_create(__u32 bitsize);
